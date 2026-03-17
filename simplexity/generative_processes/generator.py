@@ -16,6 +16,7 @@ import jax
 import jax.numpy as jnp
 
 from simplexity.generative_processes.generative_process import GenerativeProcess
+from simplexity.generative_processes.nonergodic_generative_process import NonErgodicState
 
 
 @eqx.filter_jit
@@ -77,16 +78,10 @@ def generate_data_batch_with_full_history(
 
     if bos_token is None:
         # Drop first belief state since it's the initial state before any token
-        if isinstance(belief_states, tuple):
-            belief_states = tuple(b[:, 1:, ...] for b in belief_states)
-        else:
-            belief_states = belief_states[:, 1:, ...]
+        belief_states = _slice_belief_states(belief_states, slice(1, None))
 
     input_len = inputs.shape[1]
-    if isinstance(belief_states, tuple):
-        belief_states = tuple(b[:, :input_len, ...] for b in belief_states)
-    else:
-        belief_states = belief_states[:, :input_len, ...]
+    belief_states = _slice_belief_states(belief_states, slice(None, input_len))
 
     result = {
         "belief_states": belief_states,
@@ -96,6 +91,31 @@ def generate_data_batch_with_full_history(
     }
 
     return result
+
+
+def _slice_belief_states(
+    belief_states: jax.Array | tuple[jax.Array, ...] | NonErgodicState,
+    seq_slice: slice,
+) -> jax.Array | tuple[jax.Array, ...] | NonErgodicState:
+    """Slice belief states along the sequence dimension (axis 1).
+
+    Handles different state representations:
+    - Plain array: slice directly
+    - Tuple of arrays: slice each element
+    - NonErgodicState: slice both component_beliefs and component_states
+    """
+    if isinstance(belief_states, NonErgodicState):
+        return NonErgodicState(
+            component_beliefs=belief_states.component_beliefs[:, seq_slice, ...],
+            component_states=tuple(
+                tuple(s[:, seq_slice, ...] for s in cs) if isinstance(cs, tuple) else cs[:, seq_slice, ...]
+                for cs in belief_states.component_states
+            ),
+        )
+    elif isinstance(belief_states, tuple):
+        return tuple(b[:, seq_slice, ...] for b in belief_states)
+    else:
+        return belief_states[:, seq_slice, ...]
 
 
 def _compute_prefix_probabilities(
