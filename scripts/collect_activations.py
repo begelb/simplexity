@@ -161,10 +161,9 @@ scalars, arrays = tracker.analyze(
     activations=resid_acts,
 )
 
-print("\nRegression results per hook point:")
+print("\nAll scalar results from ActivationTracker:")
 for key, value in scalars.items():
-    if "r2" in key or "rmse" in key:
-        print(f"  {key}: {value:.4f}")
+    print(f"  {key}: {value:.4f}")
 
 # ---------------------------------------------------------------------------
 # Step 5: Produce simplex projection plots
@@ -184,24 +183,28 @@ colors = (colors - colors.min(axis=0)) / (colors.max(axis=0) - colors.min(axis=0
 simplex_x = beliefs_flat[:, 1] - beliefs_flat[:, 0]
 simplex_y = beliefs_flat[:, 2] - 0.5 * (beliefs_flat[:, 0] + beliefs_flat[:, 1])
 
+from simplexity.analysis.metric_keys import format_layer_spec  # noqa: E402
+
 for hook in RESIDUAL_STREAM_HOOKS:
     if hook not in resid_acts:
         continue
     safe_hook = hook.replace(".", "_")
+    layer_spec = format_layer_spec(hook)
 
-    # PCA projections from ActivationTracker output
-    pca_key = f"pca/{safe_hook}/pca"
+    # PCA projections from ActivationTracker — keys are formatted as pca/pca/{layer_spec}
+    pca_key = f"pca/pca/{layer_spec}"
     if pca_key not in arrays:
-        # ActivationTracker concatenates layers — fall back to first available pca key
-        pca_key = next((k for k in arrays if "pca" in k), None)
+        print(f"  No PCA result found for {hook} (tried key: {pca_key})")
+        print(f"  Available array keys: {list(arrays.keys())[:5]}")
+        pca_key = next((k for k in arrays if k.startswith("pca/pca")), None)
     if pca_key is None:
-        print(f"  No PCA result found for {hook}, skipping plot")
+        print(f"  Skipping plot for {hook}")
         continue
 
     projections = np.array(arrays[pca_key])  # [n_seq * seq_len, 2]
 
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-    r2_key = f"regression/{safe_hook}/r2"
+    r2_key = f"regression/r2/{layer_spec}"
     r2 = scalars.get(r2_key, float("nan"))
     fig.suptitle(f"Hook: {hook}  |  R²={r2:.4f}", fontsize=11)
 
