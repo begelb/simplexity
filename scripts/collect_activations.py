@@ -24,7 +24,6 @@ import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import mlflow
-import mlflow.pytorch
 import numpy as np
 import torch
 
@@ -32,14 +31,15 @@ from simplexity.activations.activation_analyses import LinearRegressionAnalysis,
 from simplexity.activations.activation_tracker import ActivationTracker
 from simplexity.generative_processes.builder import build_hidden_markov_model
 from simplexity.generative_processes.torch_generator import generate_data_batch_with_full_history
+from simplexity.persistence.mlflow_persister import MLFlowPersister
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 
 TRACKING_URI = "sqlite:///tests/end_to_end/mlflow.db"
-MODEL_NAME = "hooked_transformer"
-MODEL_VERSION = "2"
+EXPERIMENT_NAME = "/Shared/training_test"
+RUN_NAME: str | None = None  # None = use the most recent run in the experiment
 
 PROCESS_NAME = "mess3"
 PROCESS_PARAMS = {"x": 0.15, "a": 0.6}
@@ -60,18 +60,42 @@ RESIDUAL_STREAM_HOOKS = [
 ]
 
 # ---------------------------------------------------------------------------
-# Step 1: Load the trained model
+# Step 1: Find the MLflow run and list available checkpoints
 # ---------------------------------------------------------------------------
 
-print("Loading model from MLflow...")
+print("Connecting to MLflow...")
 mlflow.set_tracking_uri(TRACKING_URI)
-model = mlflow.pytorch.load_model(f"models:/{MODEL_NAME}/{MODEL_VERSION}")
-model.eval()
-device = next(model.parameters()).device
-print(f"Model loaded on device: {device}")
+client = mlflow.MlflowClient(tracking_uri=TRACKING_URI)
+
+experiment = client.get_experiment_by_name(EXPERIMENT_NAME)
+assert experiment is not None, f"Experiment '{EXPERIMENT_NAME}' not found"
+
+if RUN_NAME is not None:
+    runs = client.search_runs(
+        experiment_ids=[experiment.experiment_id],
+        filter_string=f"attributes.run_name = '{RUN_NAME}'",
+        order_by=["start_time DESC"],
+        max_results=1,
+    )
+else:
+    runs = client.search_runs(
+        experiment_ids=[experiment.experiment_id],
+        order_by=["start_time DESC"],
+        max_results=1,
+    )
+
+assert len(runs) > 0, f"No runs found in experiment '{EXPERIMENT_NAME}'"
+run = runs[0]
+run_id = run.info.run_id
+print(f"Using run: {run.info.run_name} ({run_id})")
+
+artifacts = client.list_artifacts(run_id, "models/pytorch")
+checkpoint_steps = sorted(int(a.path.split("/")[-1]) for a in artifacts if a.is_dir)
+assert len(checkpoint_steps) > 0, "No checkpoint steps found in run artifacts"
+print(f"Found {len(checkpoint_steps)} checkpoints at steps: {checkpoint_steps}")
 
 # ---------------------------------------------------------------------------
-# Step 2: Generate all possible sequences and compute belief states
+# Step 2: Generate all possible sequences and compute belief states (once)
 #
 # Reuses generate_data_batch_with_full_history which handles:
 #   - belief state computation via Bayesian filtering
@@ -80,7 +104,7 @@ print(f"Model loaded on device: {device}")
 # We pass all sequences exhaustively rather than a random batch.
 # ---------------------------------------------------------------------------
 
-print(f"Generating all {VOCAB_SIZE}^{SEQUENCE_LENGTH} = {VOCAB_SIZE**SEQUENCE_LENGTH} sequences...")
+print(f"\nGenerating all {VOCAB_SIZE}^{SEQUENCE_LENGTH} = {VOCAB_SIZE**SEQUENCE_LENGTH} sequences...")
 
 hmm = build_hidden_markov_model(process_name=PROCESS_NAME, process_params=PROCESS_PARAMS)
 
@@ -88,7 +112,6 @@ all_sequences = list(itertools.product(range(VOCAB_SIZE), repeat=SEQUENCE_LENGTH
 n_sequences = len(all_sequences)
 sequences_jax = jnp.array(all_sequences)  # [n_seq, seq_len]
 
-# Expand initial state to match batch size
 initial_states = jnp.repeat(hmm.initial_state[None, :], n_sequences, axis=0)  # [n_seq, n_states]
 
 print("Computing belief states and prefix probabilities...")
@@ -109,34 +132,34 @@ assert isinstance(inputs, (jax.Array, torch.Tensor))
 assert isinstance(belief_states, (jax.Array, tuple))
 assert isinstance(prefix_probs, (jax.Array, torch.Tensor))
 
-inputs_torch = inputs if isinstance(inputs, torch.Tensor) else torch.tensor(np.array(inputs), dtype=torch.long)
-inputs_torch = inputs_torch.to(device)
+belief_states_np = np.array(belief_states)  # [n_seq, seq_len, n_states]
+beliefs_flat = belief_states_np.reshape(-1, belief_states_np.shape[-1])
 
-print(f"Inputs shape: {inputs_torch.shape}")
-print(f"Belief states shape: {np.array(belief_states).shape if isinstance(belief_states, jax.Array) else 'factored'}")
+colors = beliefs_flat[:, :3]
+colors = (colors - colors.min(axis=0)) / (colors.max(axis=0) - colors.min(axis=0) + 1e-8)
 
-# ---------------------------------------------------------------------------
-# Step 3: Collect all residual stream activations
-# ---------------------------------------------------------------------------
+simplex_x = beliefs_flat[:, 1] - beliefs_flat[:, 0]
+simplex_y = beliefs_flat[:, 2] - 0.5 * (beliefs_flat[:, 0] + beliefs_flat[:, 1])
 
-print("Running inference and collecting residual stream activations...")
-with torch.no_grad():
-    _, act_cache = model.run_with_cache(inputs_torch)
+print(f"Inputs shape: {np.array(inputs).shape}")
+print(f"Belief states shape: {belief_states_np.shape}")
 
-resid_acts = {k: v.detach().cpu() for k, v in act_cache.items() if k in RESIDUAL_STREAM_HOOKS}
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+PLOTS_DIR.mkdir(parents=True, exist_ok=True)
 
-print("Collected hook points:")
-for k, v in resid_acts.items():
-    print(f"  {k}: {v.shape}")
+np.save(OUTPUT_DIR / "inputs.npy", np.array(inputs))
+np.save(OUTPUT_DIR / "belief_states.npy", belief_states_np)
 
 # ---------------------------------------------------------------------------
-# Step 4: Run PCA and linear regression via ActivationTracker
-#
-# Reuses ActivationTracker which orchestrates both analyses with shared
-# preprocessing (deduplication, token selection, weight computation).
+# Step 3: For each checkpoint, load model, collect and save activations
 # ---------------------------------------------------------------------------
 
-print("\nRunning ActivationTracker analyses...")
+persister = MLFlowPersister(
+    experiment_name=EXPERIMENT_NAME,
+    run_id=run_id,
+    tracking_uri=TRACKING_URI,
+)
+
 tracker = ActivationTracker(
     analyses={
         "pca": PcaAnalysis(
@@ -154,89 +177,93 @@ tracker = ActivationTracker(
     }
 )
 
-scalars, arrays = tracker.analyze(
-    inputs=inputs_torch,
-    beliefs=belief_states,
-    probs=prefix_probs,
-    activations=resid_acts,
-)
-
-print("\nAll scalar results from ActivationTracker:")
-for key, value in scalars.items():
-    print(f"  {key}: {value:.4f}")
-
-# ---------------------------------------------------------------------------
-# Step 5: Produce simplex projection plots
-# ---------------------------------------------------------------------------
-
-print("\nGenerating plots...")
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-PLOTS_DIR.mkdir(parents=True, exist_ok=True)
-
-belief_states_np = np.array(belief_states)  # [n_seq, seq_len, n_states]
-beliefs_flat = belief_states_np.reshape(-1, belief_states_np.shape[-1])  # [n_seq * seq_len, n_states]
-
-colors = beliefs_flat[:, :3]
-colors = (colors - colors.min(axis=0)) / (colors.max(axis=0) - colors.min(axis=0) + 1e-8)
-
-# Ground-truth simplex coordinates (2D projection of 3-simplex)
-simplex_x = beliefs_flat[:, 1] - beliefs_flat[:, 0]
-simplex_y = beliefs_flat[:, 2] - 0.5 * (beliefs_flat[:, 0] + beliefs_flat[:, 1])
-
 from simplexity.analysis.metric_keys import format_layer_spec  # noqa: E402
 
-for hook in RESIDUAL_STREAM_HOOKS:
-    if hook not in resid_acts:
-        continue
-    safe_hook = hook.replace(".", "_")
-    layer_spec = format_layer_spec(hook)
+for step in checkpoint_steps:
+    print(f"\n{'=' * 60}")
+    print(f"Checkpoint step {step}")
+    print(f"{'=' * 60}")
 
-    # PCA projections from ActivationTracker — keys are formatted as pca/pca/{layer_spec}
-    pca_key = f"pca/pca/{layer_spec}"
-    if pca_key not in arrays:
-        print(f"  No PCA result found for {hook} (tried key: {pca_key})")
-        print(f"  Available array keys: {list(arrays.keys())[:5]}")
-        pca_key = next((k for k in arrays if k.startswith("pca/pca")), None)
-    if pca_key is None:
-        print(f"  Skipping plot for {hook}")
-        continue
+    model = persister.load_model(step=step)
+    model.eval()
+    device = next(model.parameters()).device
 
-    projections = np.array(arrays[pca_key])  # [n_seq * seq_len, 2]
+    inputs_torch = inputs if isinstance(inputs, torch.Tensor) else torch.tensor(np.array(inputs), dtype=torch.long)
+    inputs_torch = inputs_torch.to(device)
 
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-    r2_key = f"regression/r2/{layer_spec}"
-    r2 = scalars.get(r2_key, float("nan"))
-    fig.suptitle(f"Hook: {hook}  |  R²={r2:.4f}", fontsize=11)
+    print("Running inference...")
+    with torch.no_grad():
+        _, act_cache = model.run_with_cache(inputs_torch)
 
-    axes[0].scatter(projections[:, 0], projections[:, 1], c=colors, s=1, alpha=0.5)
-    axes[0].set_title("Residual stream (PCA, colored by belief state)")
-    axes[0].set_xlabel("PC1")
-    axes[0].set_ylabel("PC2")
+    resid_acts = {k: v.detach().cpu() for k, v in act_cache.items() if k in RESIDUAL_STREAM_HOOKS}
 
-    axes[1].scatter(simplex_x, simplex_y, c=colors, s=1, alpha=0.5)
-    axes[1].set_title("Ground-truth belief state geometry")
-    axes[1].set_xlabel("Simplex x")
-    axes[1].set_ylabel("Simplex y")
+    print("Running ActivationTracker analyses...")
+    scalars, arrays = tracker.analyze(
+        inputs=inputs_torch,
+        beliefs=belief_states,
+        probs=prefix_probs,
+        activations=resid_acts,
+    )
 
-    plt.tight_layout()
-    plot_path = PLOTS_DIR / f"{safe_hook}.png"
-    plt.savefig(plot_path, dpi=150)
-    plt.close()
-    print(f"  Saved {plot_path}")
+    print("Scalar results:")
+    for key, value in scalars.items():
+        print(f"  {key}: {value:.4f}")
 
-# ---------------------------------------------------------------------------
-# Step 6: Save raw data to disk for persistent homology analysis
-# ---------------------------------------------------------------------------
+    step_output_dir = OUTPUT_DIR / str(step)
+    step_output_dir.mkdir(parents=True, exist_ok=True)
+    step_plots_dir = PLOTS_DIR / str(step)
+    step_plots_dir.mkdir(parents=True, exist_ok=True)
 
-print("\nSaving data to disk...")
-np.save(OUTPUT_DIR / "inputs.npy", np.array(inputs_torch.cpu()))
-np.save(OUTPUT_DIR / "belief_states.npy", belief_states_np)
+    for hook, activations in resid_acts.items():
+        safe_hook = hook.replace(".", "_")
+        np.save(step_output_dir / f"activations_{safe_hook}.npy", activations.numpy())
 
-for hook, activations in resid_acts.items():
-    safe_hook = hook.replace(".", "_")
-    np.save(OUTPUT_DIR / f"activations_{safe_hook}.npy", activations.numpy())
+    for hook in RESIDUAL_STREAM_HOOKS:
+        if hook not in resid_acts:
+            continue
+        safe_hook = hook.replace(".", "_")
+        layer_spec = format_layer_spec(hook)
 
-print("\nSaved files:")
+        pca_key = f"pca/pca/{layer_spec}"
+        if pca_key not in arrays:
+            pca_key = next((k for k in arrays if k.startswith("pca/pca")), None)
+        if pca_key is None:
+            print(f"  Skipping plot for {hook} (no PCA result)")
+            continue
+
+        projections = np.array(arrays[pca_key])
+
+        fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+        r2_key = f"regression/r2/{layer_spec}"
+        r2 = scalars.get(r2_key, float("nan"))
+        fig.suptitle(f"Step {step} | Hook: {hook}  |  R²={r2:.4f}", fontsize=11)
+
+        axes[0].scatter(projections[:, 0], projections[:, 1], c=colors, s=1, alpha=0.5)
+        axes[0].set_title("Residual stream (PCA, colored by belief state)")
+        axes[0].set_xlabel("PC1")
+        axes[0].set_ylabel("PC2")
+
+        axes[1].scatter(simplex_x, simplex_y, c=colors, s=1, alpha=0.5)
+        axes[1].set_title("Ground-truth belief state geometry")
+        axes[1].set_xlabel("Simplex x")
+        axes[1].set_ylabel("Simplex y")
+
+        plt.tight_layout()
+        plot_path = step_plots_dir / f"{safe_hook}.png"
+        plt.savefig(plot_path, dpi=150)
+        plt.close()
+
+    print(f"Saved activations to {step_output_dir}/")
+    print(f"Saved plots to {step_plots_dir}/")
+
+persister.cleanup()
+
+print(f"\nDone. Processed {len(checkpoint_steps)} checkpoints.")
+print("\nOutput structure:")
 for path in sorted(OUTPUT_DIR.iterdir()):
-    size_mb = path.stat().st_size / 1e6
-    print(f"  {path.name}: {size_mb:.2f} MB")
+    if path.is_dir():
+        files = list(path.iterdir())
+        print(f"  {path.name}/ ({len(files)} files)")
+    else:
+        size_mb = path.stat().st_size / 1e6
+        print(f"  {path.name}: {size_mb:.2f} MB")
