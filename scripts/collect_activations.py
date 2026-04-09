@@ -15,8 +15,10 @@ The two new operations not covered by existing code:
 
 Usage:
     uv run --python 3.12 python scripts/collect_activations.py
+    uv run --python 3.12 python scripts/collect_activations.py --run-name training_test_20260408_213832
 """
 
+import argparse
 import itertools
 from pathlib import Path
 
@@ -37,9 +39,14 @@ from simplexity.persistence.mlflow_persister import MLFlowPersister
 # Configuration
 # ---------------------------------------------------------------------------
 
+_parser = argparse.ArgumentParser()
+_parser.add_argument("--run-name", type=str, default=None, help="MLflow run name (default: most recent run)")
+_parser.add_argument("--experiment-name", type=str, default="/Shared/training_test")
+_args = _parser.parse_args()
+
 TRACKING_URI = "sqlite:///tests/end_to_end/mlflow.db"
-EXPERIMENT_NAME = "/Shared/training_test"
-RUN_NAME: str | None = None  # None = use the most recent run in the experiment
+EXPERIMENT_NAME: str = _args.experiment_name
+RUN_NAME: str | None = _args.run_name
 
 PROCESS_NAME = "mess3"
 PROCESS_PARAMS = {"x": 0.15, "a": 0.6}
