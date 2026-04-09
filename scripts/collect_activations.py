@@ -55,8 +55,8 @@ BOS_TOKEN = 3  # matches training config (base_vocab_size=3, bos_token=3)
 VOCAB_SIZE = 3
 SEQUENCE_LENGTH = 8  # matches training context length
 
-OUTPUT_DIR = Path("outputs/activations")
-PLOTS_DIR = Path("outputs/plots")
+OUTPUT_BASE_DIR = Path("outputs/activations")
+PLOTS_BASE_DIR = Path("outputs/plots")
 
 RESIDUAL_STREAM_HOOKS = [
     "hook_embed",
@@ -94,7 +94,11 @@ else:
 assert len(runs) > 0, f"No runs found in experiment '{EXPERIMENT_NAME}'"
 run = runs[0]
 run_id = run.info.run_id
-print(f"Using run: {run.info.run_name} ({run_id})")
+run_name = run.info.run_name
+print(f"Using run: {run_name} ({run_id})")
+
+OUTPUT_DIR = OUTPUT_BASE_DIR / run_name
+PLOTS_DIR = PLOTS_BASE_DIR / run_name
 
 artifacts = client.list_artifacts(run_id, "models")
 checkpoint_steps = sorted(int(a.path.split("/")[-1]) for a in artifacts if a.is_dir)
