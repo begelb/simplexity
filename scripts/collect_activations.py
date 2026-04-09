@@ -96,7 +96,7 @@ run = runs[0]
 run_id = run.info.run_id
 print(f"Using run: {run.info.run_name} ({run_id})")
 
-artifacts = client.list_artifacts(run_id, "models/pytorch")
+artifacts = client.list_artifacts(run_id, "models")
 checkpoint_steps = sorted(int(a.path.split("/")[-1]) for a in artifacts if a.is_dir)
 assert len(checkpoint_steps) > 0, "No checkpoint steps found in run artifacts"
 print(f"Found {len(checkpoint_steps)} checkpoints at steps: {checkpoint_steps}")
