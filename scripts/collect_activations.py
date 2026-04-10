@@ -158,7 +158,8 @@ print(f"Belief states shape: {belief_states_np.shape}")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 PLOTS_DIR.mkdir(parents=True, exist_ok=True)
 
-np.save(OUTPUT_DIR / "inputs.npy", np.array(inputs))
+inputs_np = inputs.cpu().numpy() if isinstance(inputs, torch.Tensor) else np.array(inputs)
+np.save(OUTPUT_DIR / "inputs.npy", inputs_np)
 np.save(OUTPUT_DIR / "belief_states.npy", belief_states_np)
 
 # ---------------------------------------------------------------------------
