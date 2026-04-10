@@ -152,7 +152,7 @@ colors = (colors - colors.min(axis=0)) / (colors.max(axis=0) - colors.min(axis=0
 simplex_x = beliefs_flat[:, 1] - beliefs_flat[:, 0]
 simplex_y = beliefs_flat[:, 2] - 0.5 * (beliefs_flat[:, 0] + beliefs_flat[:, 1])
 
-print(f"Inputs shape: {np.array(inputs).shape}")
+print(f"Inputs shape: {np.array(inputs.cpu() if isinstance(inputs, torch.Tensor) else inputs).shape}")
 print(f"Belief states shape: {belief_states_np.shape}")
 
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
