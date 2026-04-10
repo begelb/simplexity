@@ -48,10 +48,6 @@ TRACKING_URI = "sqlite:///tests/end_to_end/mlflow.db"
 EXPERIMENT_NAME: str = _args.experiment_name
 RUN_NAME: str | None = _args.run_name
 
-PROCESS_NAME = "mess3"
-PROCESS_PARAMS = {"x": 0.15, "a": 0.6}
-BOS_TOKEN = 3  # matches training config (base_vocab_size=3, bos_token=3)
-
 VOCAB_SIZE = 3
 SEQUENCE_LENGTH = 8  # matches training context length
 
@@ -96,6 +92,22 @@ run = runs[0]
 run_id = run.info.run_id
 run_name = run.info.run_name
 print(f"Using run: {run_name} ({run_id})")
+
+# Load process params from the run's saved config
+import tempfile
+
+from omegaconf import OmegaConf
+
+with tempfile.TemporaryDirectory() as tmp:
+    config_path = client.download_artifacts(run_id, "config.yaml", dst_path=tmp)
+    run_config = OmegaConf.load(config_path)
+
+PROCESS_NAME: str = OmegaConf.select(run_config, "generative_process.instance.process_name")
+PROCESS_PARAMS: dict = OmegaConf.to_container(  # type: ignore[assignment]
+    OmegaConf.select(run_config, "generative_process.instance.process_params")
+)
+BOS_TOKEN: int = OmegaConf.select(run_config, "generative_process.bos_token")
+print(f"Process: {PROCESS_NAME}, params: {PROCESS_PARAMS}, bos_token: {BOS_TOKEN}")
 
 OUTPUT_DIR = OUTPUT_BASE_DIR / run_name
 PLOTS_DIR = PLOTS_BASE_DIR / run_name
